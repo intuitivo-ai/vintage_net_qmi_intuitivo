@@ -1,5 +1,15 @@
 # Changelog
 
+## [v0.4.4] - 2025-06-09
+
+### Added
+
+* Licensing and copyright clarifications for REUSE compliance
+
+### Changed
+
+* Elixir 1.19 error and warning fixes
+
 ## [v0.4.3] - 2024-09-13
 
 ### Changed
