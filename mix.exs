@@ -15,12 +15,7 @@ defmodule VintageNetQMI.MixProject do
       description: description(),
       dialyzer: dialyzer(),
       docs: docs(),
-      package: package(),
-      preferred_cli_env: [
-        docs: :docs,
-        "hex.build": :docs,
-        "hex.publish": :docs
-      ]
+      package: package()
     ]
   end
 
@@ -28,6 +23,10 @@ defmodule VintageNetQMI.MixProject do
     [
       extra_applications: [:logger]
     ]
+  end
+
+  def cli do
+    [preferred_envs: [docs: :docs, "hex.build": :docs, "hex.publish": :docs]]
   end
 
   defp deps do
