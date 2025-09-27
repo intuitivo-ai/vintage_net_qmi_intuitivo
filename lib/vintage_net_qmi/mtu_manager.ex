@@ -69,7 +69,7 @@ defmodule VintageNetQMI.MtuManager do
 
     if is_integer(mtu) and mtu > 0 do
       set_mtu_linux(ifname, mtu)
-      ensure_tcpmss_rules(ifname)
+      #ensure_tcpmss_rules(ifname)
       :ok
     else
       Logger.debug("[VintageNetQMI] MTU not available yet for #{ifname}")
