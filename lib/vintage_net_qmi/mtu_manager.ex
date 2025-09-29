@@ -35,16 +35,20 @@ defmodule VintageNetQMI.MtuManager do
   end
 
   @impl GenServer
-  def handle_info({VintageNet, ["interface", ifname, "connection"], _old, status, _meta},
-                  %{ifname: ifname} = state)
+  def handle_info(
+        {VintageNet, ["interface", ifname, "connection"], _old, status, _meta},
+        %{ifname: ifname} = state
+      )
       when status in [:lan, :internet] do
     _ = apply_mtu_and_mss(state)
     {:ok, ref} = :timer.send_interval(state.refresh_ms, :refresh)
     {:noreply, %{state | refresh_ref: ref}}
   end
 
-  def handle_info({VintageNet, ["interface", ifname, "connection"], _old, _status, _meta},
-                  %{ifname: ifname, refresh_ref: ref} = state) do
+  def handle_info(
+        {VintageNet, ["interface", ifname, "connection"], _old, _status, _meta},
+        %{ifname: ifname, refresh_ref: ref} = state
+      ) do
     if is_reference(ref), do: Process.cancel_timer(ref)
     {:noreply, %{state | refresh_ref: nil}}
   end
@@ -59,7 +63,9 @@ defmodule VintageNetQMI.MtuManager do
 
     mtu =
       case QMI.WirelessData.get_current_settings(qmi, 6, opts) do
-        {:ok, m} when is_map(m) and map_size(m) > 0 -> m[:ipv6_mtu] || m[:ipv4_mtu]
+        {:ok, m} when is_map(m) and map_size(m) > 0 ->
+          m[:ipv6_mtu] || m[:ipv4_mtu]
+
         _ ->
           case QMI.WirelessData.get_current_settings(qmi, 4, opts) do
             {:ok, m} when is_map(m) and map_size(m) > 0 -> m[:ipv4_mtu] || m[:ipv6_mtu]
@@ -69,7 +75,7 @@ defmodule VintageNetQMI.MtuManager do
 
     if is_integer(mtu) and mtu > 0 do
       set_mtu_linux(ifname, mtu)
-      #ensure_tcpmss_rules(ifname)
+      # ensure_tcpmss_rules(ifname)
       :ok
     else
       Logger.debug("[VintageNetQMI] MTU not available yet for #{ifname}")
@@ -79,15 +85,5 @@ defmodule VintageNetQMI.MtuManager do
 
   defp set_mtu_linux(ifname, mtu) do
     System.cmd("ip", ["link", "set", "dev", ifname, "mtu", Integer.to_string(mtu)])
-  end
-
-  defp ensure_tcpmss_rules(ifname) do
-    # Add clamp rules idempotently; ignore errors if already present
-    _ = System.cmd("sh", ["-c",
-      "iptables -t mangle -C FORWARD -o #{ifname} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || iptables -t mangle -A FORWARD -o #{ifname} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"],
-      stderr_to_stdout: true)
-    _ = System.cmd("sh", ["-c",
-      "iptables -t mangle -C OUTPUT -o #{ifname} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || iptables -t mangle -A OUTPUT -o #{ifname} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"],
-      stderr_to_stdout: true)
   end
 end
