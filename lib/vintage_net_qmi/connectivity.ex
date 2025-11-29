@@ -77,7 +77,9 @@ defmodule VintageNetQMI.Connectivity do
     # If the GenServer crashed and recovered, try to guess the status even though
     # we don't know the serving system info.
     guessed_status =
-      if connection_status == :internet and has_ipv4?, do: :internet, else: :disconnected
+      if (connection_status == :internet or connection_status == :lan) and has_ipv4?,
+        do: :lan,
+        else: :disconnected
 
     RouteManager.set_connection_status(ifname, guessed_status, "Initial state")
 
@@ -100,7 +102,7 @@ defmodule VintageNetQMI.Connectivity do
       # The packet data connection status reported from QMI. Being connected
       # does not mean that the IP address has been assigned only that
       # IP address configuration can commence.
-      packet_data_connection?: guessed_status == :internet
+      packet_data_connection?: guessed_status == :lan or guessed_status == :internet
     }
 
     _ = :timer.send_interval(30_000, :check_connectivity)
@@ -159,6 +161,14 @@ defmodule VintageNetQMI.Connectivity do
   defp prop_name_for_serving_system_field(other), do: Atom.to_string(other)
 
   @impl GenServer
+  def handle_info(
+        {VintageNet, ["interface", ifname, "connection"], _old, :internet, _meta},
+        %{ifname: ifname} = state
+      ) do
+    # External check passed (pings working). Update our status so pet_watchdog works.
+    {:noreply, %{state | reported_status: :internet}}
+  end
+
   def handle_info(
         {VintageNet, ["interface", ifname, "connection"], _, :lan, _meta},
         %{ifname: ifname} = state
@@ -264,7 +274,7 @@ defmodule VintageNetQMI.Connectivity do
        })
        when network != :network_unknown and
               radio_ifs != [] do
-    :internet
+    :lan
   end
 
   # This last catch-all is for any serving system information change that's not
@@ -284,20 +294,20 @@ defmodule VintageNetQMI.Connectivity do
   defp derive_status(_state), do: :going_down
 
   defp update_connection_status(
-         %{reported_status: :disconnected, derived_status: :internet} = state
+         %{reported_status: :disconnected, derived_status: :lan} = state
        ) do
     RouteManager.set_connection_status(
       state.ifname,
-      :internet,
-      "QMI reports Internet-connectivity"
+      :lan,
+      "QMI reports LAN connectivity"
     )
 
-    %{state | reported_status: :internet}
+    %{state | reported_status: :lan}
   end
 
   defp update_connection_status(
-         %{reported_status: :internet, derived_status: :disconnected} = state
-       ) do
+         %{derived_status: :disconnected} = state
+       ) when state.reported_status != :disconnected do
     RouteManager.set_connection_status(
       state.ifname,
       :disconnected,

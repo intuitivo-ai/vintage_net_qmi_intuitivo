@@ -61,7 +61,7 @@ defmodule VintageNetQMI.ModemInfo do
   def handle_info(:get_iccid, state) do
     qmi = VintageNetQMI.qmi_name(state.ifname)
 
-    case UserIdentity.read_transparent(qmi, @iccid_file_id, @main_file_path) do
+    case UserIdentity.read_transparent(qmi, @iccid_file_id, @main_file_path, timeout: 10_000) do
       {:ok, read_response} ->
         iccid = UserIdentity.parse_iccid(read_response.read_result)
         property_table_put("iccid", iccid, state)
