@@ -32,7 +32,10 @@ defmodule VintageNetQMI.MixProject do
   defp deps do
     [
       {:vintage_net, "~> 0.12.0 or ~> 0.13.0"},
-      {:qmi, "~> 0.10.0"},
+      {:qmi, "~> 0.10.0",
+       git: "https://github.com/intuitivo-ai/qmi_intuitivo.git",
+       branch: "fixes-check",
+       override: true},
       {:credo, "~> 1.5", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4.1", only: :dev, runtime: false},
       {:ex_doc, "~> 0.23", only: :docs, runtime: false}
