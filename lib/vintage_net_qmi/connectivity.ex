@@ -32,7 +32,8 @@ defmodule VintageNetQMI.Connectivity do
     :lan?,
     :ip_address?,
     :serving_system,
-    :packet_data_connection?
+    :packet_data_connection?,
+    :soft_recovery_timer
   ]
 
   @doc """
@@ -88,6 +89,7 @@ defmodule VintageNetQMI.Connectivity do
       reported_status: guessed_status,
       derived_status: guessed_status,
       grace_timer: nil,
+      soft_recovery_timer: nil,
       # The following keep track of all of the conditions that need to be
       # true for the modem to have internet access
       lan?: connection_status == :lan or connection_status == :internet,
@@ -166,6 +168,7 @@ defmodule VintageNetQMI.Connectivity do
         %{ifname: ifname} = state
       ) do
     # External check passed (pings working). Update our status so pet_watchdog works.
+    state = cancel_soft_recovery_timer(state)
     {:noreply, %{state | reported_status: :internet}}
   end
 
@@ -174,9 +177,10 @@ defmodule VintageNetQMI.Connectivity do
         %{ifname: ifname} = state
       ) do
     new_state =
-      %{state | lan?: true}
+      %{state | lan?: true, reported_status: :lan}
       |> update_derived_status()
       |> update_connection_status()
+      |> maybe_start_soft_recovery_timer()
 
     {:noreply, new_state}
   end
@@ -211,6 +215,14 @@ defmodule VintageNetQMI.Connectivity do
     end
 
     {:noreply, state}
+  end
+
+  def handle_info(:soft_recovery, state) do
+    if state.reported_status == :lan do
+      VintageNetQMI.Connection.reconnect(state.ifname)
+    end
+    # Don't restart timer; if this fails, watchdog will hit later
+    {:noreply, %{state | soft_recovery_timer: nil}}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -314,10 +326,24 @@ defmodule VintageNetQMI.Connectivity do
       "QMI(#{inspect(state)}}"
     )
 
+    state = cancel_soft_recovery_timer(state)
     %{state | reported_status: :disconnected}
   end
 
   defp update_connection_status(state), do: state
+
+  defp maybe_start_soft_recovery_timer(%{soft_recovery_timer: nil, reported_status: :lan} = state) do
+    # Try soft recovery after 20s if we are stuck in LAN (internet failed)
+    {:ok, timer} = :timer.send_after(20_000, :soft_recovery)
+    %{state | soft_recovery_timer: timer}
+  end
+  defp maybe_start_soft_recovery_timer(state), do: state
+
+  defp cancel_soft_recovery_timer(%{soft_recovery_timer: timer} = state) when is_reference(timer) do
+    _ = :timer.cancel(timer)
+    %{state | soft_recovery_timer: nil}
+  end
+  defp cancel_soft_recovery_timer(state), do: state
 
   defp has_ipv4_address?(nil), do: false
 
