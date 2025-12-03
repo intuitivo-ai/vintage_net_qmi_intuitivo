@@ -71,14 +71,15 @@ defmodule VintageNetQMI.MtuManager do
 
   defp apply_mtu_and_mss(%{ifname: ifname, qmi: qmi}) do
     opts = [extended_mask: 0xFFFF_FFFF]
+    call_opts = [timeout: 10_000]
 
     mtu =
-      case QMI.WirelessData.get_current_settings(qmi, 6, opts) do
+      case QMI.WirelessData.get_current_settings(qmi, 6, opts, call_opts) do
         {:ok, m} when is_map(m) and map_size(m) > 0 ->
           m[:ipv6_mtu] || m[:ipv4_mtu]
 
         _ ->
-          case QMI.WirelessData.get_current_settings(qmi, 4, opts) do
+          case QMI.WirelessData.get_current_settings(qmi, 4, opts, call_opts) do
             {:ok, m} when is_map(m) and map_size(m) > 0 -> m[:ipv4_mtu] || m[:ipv6_mtu]
             _ -> nil
           end
