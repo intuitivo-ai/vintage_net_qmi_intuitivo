@@ -139,8 +139,8 @@ defmodule VintageNetQMI.Connection do
     end
 
     # Schedule a reconnect
-    start_try_to_connect_timer(%{state | connect_retry_interval: 1000, packet_data_handle: nil})
-    {:noreply, %{state | packet_data_handle: nil}}
+    state = start_try_to_connect_timer(%{state | connect_retry_interval: 1000, packet_data_handle: nil})
+    {:noreply, state}
   end
 
   @impl GenServer
