@@ -34,7 +34,8 @@ defmodule VintageNetQMI.Connectivity do
     :serving_system,
     :packet_data_connection?,
     :soft_recovery_timer,
-    :soft_recovery_attempts
+    :soft_recovery_attempts,
+    :stability_timer
   ]
 
   @doc """
@@ -106,7 +107,8 @@ defmodule VintageNetQMI.Connectivity do
       # does not mean that the IP address has been assigned only that
       # IP address configuration can commence.
       packet_data_connection?: guessed_status == :lan,
-      soft_recovery_attempts: 0
+      soft_recovery_attempts: 0,
+      stability_timer: nil
     }
 
     _ = :timer.send_interval(30_000, :check_connectivity)
@@ -171,7 +173,8 @@ defmodule VintageNetQMI.Connectivity do
       ) do
     # External check passed (pings working). Update our status so pet_watchdog works.
     state = cancel_soft_recovery_timer(state)
-    {:noreply, %{state | reported_status: :internet, soft_recovery_attempts: 0}}
+    state = maybe_start_stability_timer(state)
+    {:noreply, %{state | reported_status: :internet}}
   end
 
   def handle_info(
@@ -237,6 +240,20 @@ defmodule VintageNetQMI.Connectivity do
         %{state | soft_recovery_timer: timer, soft_recovery_attempts: state.soft_recovery_attempts + 1}
       else
         %{state | soft_recovery_timer: nil}
+      end
+
+    {:noreply, new_state}
+  end
+
+  def handle_info(:stability_check, state) do
+    new_state =
+      if state.reported_status == :internet do
+        # Connection has been stable in :internet state for the duration of the timer.
+        # Reset recovery attempts.
+        %{state | soft_recovery_attempts: 0, stability_timer: nil}
+      else
+        # Connection was not stable, do not reset attempts.
+        %{state | stability_timer: nil}
       end
 
     {:noreply, new_state}
@@ -344,11 +361,12 @@ defmodule VintageNetQMI.Connectivity do
     )
 
     state = cancel_soft_recovery_timer(state)
+    state = cancel_stability_timer(state)
 
     # Si venimos de LAN (o cualquier estado que no sea internet real validado), incrementamos intentos.
     # Esto captura el caso de flapping donde nunca llega a dispararse el timer.
     new_attempts =
-      if state.reported_status == :lan,
+      if state.reported_status == :lan or state.reported_status == :internet,
         do: state.soft_recovery_attempts + 1,
         else: state.soft_recovery_attempts
 
@@ -356,6 +374,19 @@ defmodule VintageNetQMI.Connectivity do
   end
 
   defp update_connection_status(state), do: state
+
+  defp maybe_start_stability_timer(%{stability_timer: nil} = state) do
+    # Require 60 seconds of stable :internet before resetting attempts
+    {:ok, timer} = :timer.send_after(60_000, :stability_check)
+    %{state | stability_timer: timer}
+  end
+  defp maybe_start_stability_timer(state), do: state
+
+  defp cancel_stability_timer(%{stability_timer: timer} = state) when is_reference(timer) do
+    _ = :timer.cancel(timer)
+    %{state | stability_timer: nil}
+  end
+  defp cancel_stability_timer(state), do: state
 
   defp maybe_start_soft_recovery_timer(%{soft_recovery_timer: nil, reported_status: :lan} = state) do
     # Try soft recovery after 20s if we are stuck in LAN (internet failed)
