@@ -230,7 +230,11 @@ defmodule VintageNetQMI.Connectivity do
     new_state =
       if state.reported_status == :lan do
         VintageNetQMI.Connection.reconnect(state.ifname)
-        %{state | soft_recovery_timer: nil, soft_recovery_attempts: state.soft_recovery_attempts + 1}
+
+        # Reiniciamos el timer explícitamente para el siguiente intento
+        {:ok, timer} = :timer.send_after(20_000, :soft_recovery)
+
+        %{state | soft_recovery_timer: timer, soft_recovery_attempts: state.soft_recovery_attempts + 1}
       else
         %{state | soft_recovery_timer: nil}
       end
