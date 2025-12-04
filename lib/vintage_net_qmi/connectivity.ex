@@ -344,7 +344,15 @@ defmodule VintageNetQMI.Connectivity do
     )
 
     state = cancel_soft_recovery_timer(state)
-    %{state | reported_status: :disconnected}
+
+    # Si venimos de LAN (o cualquier estado que no sea internet real validado), incrementamos intentos.
+    # Esto captura el caso de flapping donde nunca llega a dispararse el timer.
+    new_attempts =
+      if state.reported_status == :lan,
+        do: state.soft_recovery_attempts + 1,
+        else: state.soft_recovery_attempts
+
+    %{state | reported_status: :disconnected, soft_recovery_attempts: new_attempts}
   end
 
   defp update_connection_status(state), do: state
