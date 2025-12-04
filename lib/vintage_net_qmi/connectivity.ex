@@ -311,15 +311,15 @@ defmodule VintageNetQMI.Connectivity do
   # }
   defp derive_status(%{
          serving_system: %{
-           serving_system_cs_attach_state: :attached,
            serving_system_ps_attach_state: :attached,
            serving_system_radio_interfaces: radio_ifs,
-           serving_system_registration_state: :registered,
+           serving_system_registration_state: registration_state,
            serving_system_selected_network: network
          }
        })
        when network != :network_unknown and
-              radio_ifs != [] do
+              radio_ifs != [] and
+              (registration_state == :registered or registration_state == :roaming) do
     :lan
   end
 
