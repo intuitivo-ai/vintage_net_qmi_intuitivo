@@ -33,7 +33,8 @@ defmodule VintageNetQMI.Connectivity do
     :ip_address?,
     :serving_system,
     :packet_data_connection?,
-    :soft_recovery_timer
+    :soft_recovery_timer,
+    :soft_recovery_attempts
   ]
 
   @doc """
@@ -104,7 +105,8 @@ defmodule VintageNetQMI.Connectivity do
       # The packet data connection status reported from QMI. Being connected
       # does not mean that the IP address has been assigned only that
       # IP address configuration can commence.
-      packet_data_connection?: guessed_status == :lan or guessed_status == :internet
+      packet_data_connection?: guessed_status == :lan,
+      soft_recovery_attempts: 0
     }
 
     _ = :timer.send_interval(30_000, :check_connectivity)
@@ -169,7 +171,7 @@ defmodule VintageNetQMI.Connectivity do
       ) do
     # External check passed (pings working). Update our status so pet_watchdog works.
     state = cancel_soft_recovery_timer(state)
-    {:noreply, %{state | reported_status: :internet}}
+    {:noreply, %{state | reported_status: :internet, soft_recovery_attempts: 0}}
   end
 
   def handle_info(
@@ -210,7 +212,14 @@ defmodule VintageNetQMI.Connectivity do
   end
 
   def handle_info(:check_connectivity, state) do
-    if state.reported_status == :internet do
+    should_pet? =
+      case state.reported_status do
+        :internet -> true
+        :lan -> state.soft_recovery_attempts < 3
+        _ -> false
+      end
+
+    if should_pet? do
       PMControl.pet_watchdog(state.ifname)
     end
 
@@ -218,11 +227,15 @@ defmodule VintageNetQMI.Connectivity do
   end
 
   def handle_info(:soft_recovery, state) do
-    if state.reported_status == :lan do
-      VintageNetQMI.Connection.reconnect(state.ifname)
-    end
-    # Don't restart timer; if this fails, watchdog will hit later
-    {:noreply, %{state | soft_recovery_timer: nil}}
+    new_state =
+      if state.reported_status == :lan do
+        VintageNetQMI.Connection.reconnect(state.ifname)
+        %{state | soft_recovery_timer: nil, soft_recovery_attempts: state.soft_recovery_attempts + 1}
+      else
+        %{state | soft_recovery_timer: nil}
+      end
+
+    {:noreply, new_state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
