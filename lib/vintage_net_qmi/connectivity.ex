@@ -15,7 +15,7 @@ defmodule VintageNetQMI.Connectivity do
   # and various statuses. Moving between cell IDs causes the status
   # to look like the modem is disconnected, but then it reconnects
   # quickly. The grace period lets things settle.
-  @serving_system_down_grace_period 1000
+  @serving_system_down_grace_period 5000
 
   @typedoc """
   Connectivity server initial arguments
