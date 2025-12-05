@@ -292,8 +292,9 @@ defmodule VintageNetQMI.Connectivity do
   # Derive whether LTE is connected or not.
   # The first three cases are obviously disconnected.
   defp derive_status(%{lan?: false}), do: :disconnected
-  defp derive_status(%{ip_address?: false}), do: :disconnected
-  defp derive_status(%{packet_data_connection?: false}), do: :disconnected
+  # Treat IP loss or Packet Data loss as potential "going down" (grace period)
+  defp derive_status(%{ip_address?: false}), do: :going_down
+  defp derive_status(%{packet_data_connection?: false}), do: :going_down
 
   # At this point, we have the basics. Check that there's a network and we're
   # registered. Here's a report when connected:
