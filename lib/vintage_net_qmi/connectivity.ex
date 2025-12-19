@@ -172,9 +172,25 @@ defmodule VintageNetQMI.Connectivity do
         %{ifname: ifname} = state
       ) do
     # External check passed (pings working). Update our status so pet_watchdog works.
-    state = cancel_soft_recovery_timer(state)
-    state = maybe_start_stability_timer(state)
-    {:noreply, %{state | reported_status: :internet}}
+    #
+    # Also cancel the grace timer. If we were "going down", we're definitely back
+    # up now. If we don't cancel this, the timer could fire and disconnect us
+    # even though we have Internet access.
+    state =
+      if state.grace_timer do
+        _ = :timer.cancel(state.grace_timer)
+        %{state | grace_timer: nil}
+      else
+        state
+      end
+
+    new_state =
+      %{state | reported_status: :internet, lan?: true}
+      |> cancel_soft_recovery_timer()
+      |> maybe_start_stability_timer()
+      |> update_derived_status()
+
+    {:noreply, new_state}
   end
 
   def handle_info(
