@@ -298,7 +298,18 @@ defmodule VintageNetQMI.Connectivity do
           # If the connection might be going down, start the timer
           # unless it's already going. If it's already going, we
           # count from that point.
-          state.grace_timer || schedule_grace_timer()
+          #
+          # However, if we have a confirmed Internet connection, trust
+          # that over the modem status.
+          if state.reported_status == :internet do
+            if state.grace_timer do
+              _ = :timer.cancel(state.grace_timer)
+            end
+
+            nil
+          else
+            state.grace_timer || schedule_grace_timer()
+          end
 
         _ ->
           # If the connection is definitely up or down, make sure
