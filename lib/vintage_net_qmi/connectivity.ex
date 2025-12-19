@@ -259,7 +259,7 @@ defmodule VintageNetQMI.Connectivity do
 
   def handle_info(:soft_recovery, state) do
     new_state =
-      if state.reported_status == :lan do
+      if state.reported_status == :lan and state.soft_recovery_attempts < 3 do
         VintageNetQMI.Connection.reconnect(state.ifname)
 
         # Reiniciamos el timer explícitamente para el siguiente intento
