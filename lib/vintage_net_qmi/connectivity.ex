@@ -191,6 +191,18 @@ defmodule VintageNetQMI.Connectivity do
   end
 
   def handle_info(
+        {VintageNet, ["interface", ifname, "connection"], _, :disconnected, _meta},
+        %{ifname: ifname} = state
+      ) do
+    new_state =
+      %{state | lan?: false}
+      |> update_derived_status()
+      |> update_connection_status()
+
+    {:noreply, new_state}
+  end
+
+  def handle_info(
         {VintageNet, ["interface", ifname, "addresses"], _old, addresses, _meta},
         %{ifname: ifname} = state
       ) do
@@ -383,11 +395,13 @@ defmodule VintageNetQMI.Connectivity do
   end
   defp maybe_start_stability_timer(state), do: state
 
-  defp cancel_stability_timer(%{stability_timer: timer} = state) when is_reference(timer) do
-    _ = :timer.cancel(timer)
+  defp cancel_stability_timer(state) do
+    if state.stability_timer do
+      _ = :timer.cancel(state.stability_timer)
+    end
+
     %{state | stability_timer: nil}
   end
-  defp cancel_stability_timer(state), do: state
 
   defp maybe_start_soft_recovery_timer(%{soft_recovery_timer: nil, reported_status: :lan} = state) do
     # Try soft recovery after 20s if we are stuck in LAN (internet failed)
@@ -396,11 +410,13 @@ defmodule VintageNetQMI.Connectivity do
   end
   defp maybe_start_soft_recovery_timer(state), do: state
 
-  defp cancel_soft_recovery_timer(%{soft_recovery_timer: timer} = state) when is_reference(timer) do
-    _ = :timer.cancel(timer)
+  defp cancel_soft_recovery_timer(state) do
+    if state.soft_recovery_timer do
+      _ = :timer.cancel(state.soft_recovery_timer)
+    end
+
     %{state | soft_recovery_timer: nil}
   end
-  defp cancel_soft_recovery_timer(state), do: state
 
   defp has_ipv4_address?(nil), do: false
 

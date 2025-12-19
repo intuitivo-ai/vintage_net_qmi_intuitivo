@@ -215,6 +215,13 @@ defmodule VintageNetQMI.Connection do
         )
 
         start_try_to_connect_timer(state)
+
+      {:ok, result} ->
+        Logger.warning(
+          "[VintageNetQMI]: connection started but returned unexpected result: #{inspect(result)}. Retrying in #{inspect(state.connect_retry_interval)} ms."
+        )
+
+        start_try_to_connect_timer(state)
     end
   end
 
