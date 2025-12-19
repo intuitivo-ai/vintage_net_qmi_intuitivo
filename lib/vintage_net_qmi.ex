@@ -169,8 +169,6 @@ defmodule VintageNetQMI do
       Enum.reject(raw_config.child_specs, fn
         # Old internet connectivity checker module
         {VintageNet.Interface.InternetConnectivityChecker, _ifname} -> true
-        # New internet connectivity checker module
-        {VintageNet.Connectivity.InternetChecker, _ifname} -> true
         _ -> false
       end)
 

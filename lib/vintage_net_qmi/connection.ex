@@ -17,6 +17,7 @@ defmodule VintageNetQMI.Connection do
   require Logger
 
   @configuration_retry 30_000
+  @connect_retry_interval 30_000
 
   @typedoc """
   Options for to establish the connection
@@ -35,6 +36,14 @@ defmodule VintageNetQMI.Connection do
 
   defp name(ifname) do
     Module.concat(__MODULE__, ifname)
+  end
+
+  @doc """
+  Force a reconnection attempt
+  """
+  @spec reconnect(VintageNet.ifname()) :: :ok
+  def reconnect(ifname) do
+    GenServer.cast(name(ifname), :reconnect)
   end
 
   @doc """
@@ -66,9 +75,10 @@ defmodule VintageNetQMI.Connection do
         qmi: VintageNetQMI.qmi_name(ifname),
         service_providers: providers,
         iccid: iccid,
-        connect_retry_interval: 30_000,
+        connect_retry_interval: @connect_retry_interval,
         radio_technologies: radio_technologies,
-        configuration: Configuration.new()
+        configuration: Configuration.new(),
+        packet_data_handle: nil
       }
       |> try_to_configure_modem()
       |> maybe_start_try_to_connect_timer()
@@ -118,6 +128,23 @@ defmodule VintageNetQMI.Connection do
   end
 
   @impl GenServer
+  def handle_cast(:reconnect, state) do
+    Logger.info("[VintageNetQMI] Reconnect requested. Attempting to stop and start network interface.")
+
+    # Try to stop with wildcard handle (0xFFFFFFFF) as we don't track the handle
+    handle = state.packet_data_handle || 0xFFFFFFFF
+
+    case WirelessData.stop_network_interface(state.qmi, packet_data_handle: handle) do
+      :ok -> Logger.info("[VintageNetQMI] Network interface stopped.")
+      {:error, reason} -> Logger.warning("[VintageNetQMI] Failed to stop network interface: #{inspect(reason)}")
+    end
+
+    # Schedule a reconnect
+    state = start_try_to_connect_timer(%{state | connect_retry_interval: 1000, packet_data_handle: nil})
+    {:noreply, state}
+  end
+
+  @impl GenServer
   def handle_info(
         {VintageNet, ["interface", ifname, "mobile", "iccid"], _, new_iccid, _meta},
         %{ifname: ifname, iccid: old_iccid} = state
@@ -156,13 +183,13 @@ defmodule VintageNetQMI.Connection do
          {:ok, provider} <- ServiceProvider.select_provider_by_iccid(providers, iccid),
          PropertyTable.put(VintageNet, mobile_prop(state.ifname, "apn"), provider.apn),
          :ok <- set_roaming_allowed_for_provider(provider, three_3gpp_profile_index, state),
-         {:ok, _} <-
+         {:ok, %{packet_data_handle: handle}} <-
            WirelessData.start_network_interface(state.qmi,
              apn: provider.apn,
              profile_3gpp_index: three_3gpp_profile_index
            ) do
       Logger.info("[VintageNetQMI]: network started. Waiting on DHCP")
-      state
+      %{state | packet_data_handle: handle, connect_retry_interval: @connect_retry_interval}
     else
       {:error, :no_provider} ->
         Logger.warning(
@@ -186,6 +213,13 @@ defmodule VintageNetQMI.Connection do
       {:error, reason} ->
         Logger.warning(
           "[VintageNetQMI]: could not connect for #{inspect(reason)}. Retrying in #{inspect(state.connect_retry_interval)} ms."
+        )
+
+        start_try_to_connect_timer(state)
+
+      {:ok, result} ->
+        Logger.warning(
+          "[VintageNetQMI]: connection started but returned unexpected result: #{inspect(result)}. Retrying in #{inspect(state.connect_retry_interval)} ms."
         )
 
         start_try_to_connect_timer(state)

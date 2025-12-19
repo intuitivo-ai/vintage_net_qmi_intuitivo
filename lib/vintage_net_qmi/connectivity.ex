@@ -15,7 +15,7 @@ defmodule VintageNetQMI.Connectivity do
   # and various statuses. Moving between cell IDs causes the status
   # to look like the modem is disconnected, but then it reconnects
   # quickly. The grace period lets things settle.
-  @serving_system_down_grace_period 1000
+  @serving_system_down_grace_period 30_000
 
   @typedoc """
   Connectivity server initial arguments
@@ -32,7 +32,10 @@ defmodule VintageNetQMI.Connectivity do
     :lan?,
     :ip_address?,
     :serving_system,
-    :packet_data_connection?
+    :packet_data_connection?,
+    :soft_recovery_timer,
+    :soft_recovery_attempts,
+    :stability_timer
   ]
 
   @doc """
@@ -77,7 +80,9 @@ defmodule VintageNetQMI.Connectivity do
     # If the GenServer crashed and recovered, try to guess the status even though
     # we don't know the serving system info.
     guessed_status =
-      if connection_status == :internet and has_ipv4?, do: :internet, else: :disconnected
+      if (connection_status == :internet or connection_status == :lan) and has_ipv4?,
+        do: :lan,
+        else: :disconnected
 
     RouteManager.set_connection_status(ifname, guessed_status, "Initial state")
 
@@ -86,6 +91,7 @@ defmodule VintageNetQMI.Connectivity do
       reported_status: guessed_status,
       derived_status: guessed_status,
       grace_timer: nil,
+      soft_recovery_timer: nil,
       # The following keep track of all of the conditions that need to be
       # true for the modem to have internet access
       lan?: connection_status == :lan or connection_status == :internet,
@@ -100,7 +106,9 @@ defmodule VintageNetQMI.Connectivity do
       # The packet data connection status reported from QMI. Being connected
       # does not mean that the IP address has been assigned only that
       # IP address configuration can commence.
-      packet_data_connection?: guessed_status == :internet
+      packet_data_connection?: guessed_status == :lan,
+      soft_recovery_attempts: 0,
+      stability_timer: nil
     }
 
     _ = :timer.send_interval(30_000, :check_connectivity)
@@ -160,11 +168,50 @@ defmodule VintageNetQMI.Connectivity do
 
   @impl GenServer
   def handle_info(
+        {VintageNet, ["interface", ifname, "connection"], _old, :internet, _meta},
+        %{ifname: ifname} = state
+      ) do
+    # External check passed (pings working). Update our status so pet_watchdog works.
+    #
+    # Also cancel the grace timer. If we were "going down", we're definitely back
+    # up now. If we don't cancel this, the timer could fire and disconnect us
+    # even though we have Internet access.
+    state =
+      if state.grace_timer do
+        _ = :timer.cancel(state.grace_timer)
+        %{state | grace_timer: nil}
+      else
+        state
+      end
+
+    new_state =
+      %{state | reported_status: :internet, lan?: true}
+      |> cancel_soft_recovery_timer()
+      |> maybe_start_stability_timer()
+      |> update_derived_status()
+
+    {:noreply, new_state}
+  end
+
+  def handle_info(
         {VintageNet, ["interface", ifname, "connection"], _, :lan, _meta},
         %{ifname: ifname} = state
       ) do
     new_state =
-      %{state | lan?: true}
+      %{state | lan?: true, reported_status: :lan}
+      |> update_derived_status()
+      |> update_connection_status()
+      |> maybe_start_soft_recovery_timer()
+
+    {:noreply, new_state}
+  end
+
+  def handle_info(
+        {VintageNet, ["interface", ifname, "connection"], _, :disconnected, _meta},
+        %{ifname: ifname} = state
+      ) do
+    new_state =
+      %{state | lan?: false}
       |> update_derived_status()
       |> update_connection_status()
 
@@ -196,11 +243,48 @@ defmodule VintageNetQMI.Connectivity do
   end
 
   def handle_info(:check_connectivity, state) do
-    if state.reported_status == :internet do
+    should_pet? =
+      case state.reported_status do
+        :internet -> true
+        :lan -> state.soft_recovery_attempts < 3
+        _ -> false
+      end
+
+    if should_pet? do
       PMControl.pet_watchdog(state.ifname)
     end
 
     {:noreply, state}
+  end
+
+  def handle_info(:soft_recovery, state) do
+    new_state =
+      if state.reported_status == :lan and state.soft_recovery_attempts < 3 do
+        VintageNetQMI.Connection.reconnect(state.ifname)
+
+        # Reiniciamos el timer explícitamente para el siguiente intento
+        {:ok, timer} = :timer.send_after(20_000, :soft_recovery)
+
+        %{state | soft_recovery_timer: timer, soft_recovery_attempts: state.soft_recovery_attempts + 1}
+      else
+        %{state | soft_recovery_timer: nil}
+      end
+
+    {:noreply, new_state}
+  end
+
+  def handle_info(:stability_check, state) do
+    new_state =
+      if state.reported_status == :internet do
+        # Connection has been stable in :internet state for the duration of the timer.
+        # Reset recovery attempts.
+        %{state | soft_recovery_attempts: 0, stability_timer: nil}
+      else
+        # Connection was not stable, do not reset attempts.
+        %{state | stability_timer: nil}
+      end
+
+    {:noreply, new_state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -236,8 +320,9 @@ defmodule VintageNetQMI.Connectivity do
   # Derive whether LTE is connected or not.
   # The first three cases are obviously disconnected.
   defp derive_status(%{lan?: false}), do: :disconnected
-  defp derive_status(%{ip_address?: false}), do: :disconnected
-  defp derive_status(%{packet_data_connection?: false}), do: :disconnected
+  # Treat IP loss or Packet Data loss as potential "going down" (grace period)
+  defp derive_status(%{ip_address?: false}), do: :going_down
+  defp derive_status(%{packet_data_connection?: false}), do: :going_down
 
   # At this point, we have the basics. Check that there's a network and we're
   # registered. Here's a report when connected:
@@ -255,16 +340,16 @@ defmodule VintageNetQMI.Connectivity do
   # }
   defp derive_status(%{
          serving_system: %{
-           serving_system_cs_attach_state: :attached,
            serving_system_ps_attach_state: :attached,
            serving_system_radio_interfaces: radio_ifs,
-           serving_system_registration_state: :registered,
+           serving_system_registration_state: registration_state,
            serving_system_selected_network: network
          }
        })
        when network != :network_unknown and
-              radio_ifs != [] do
-    :internet
+              radio_ifs != [] and
+              (registration_state == :registered or registration_state == :roaming) do
+    :lan
   end
 
   # This last catch-all is for any serving system information change that's not
@@ -284,30 +369,70 @@ defmodule VintageNetQMI.Connectivity do
   defp derive_status(_state), do: :going_down
 
   defp update_connection_status(
-         %{reported_status: :disconnected, derived_status: :internet} = state
+         %{reported_status: :disconnected, derived_status: :lan} = state
        ) do
     RouteManager.set_connection_status(
       state.ifname,
-      :internet,
-      "QMI reports Internet-connectivity"
+      :lan,
+      "QMI reports LAN connectivity"
     )
 
-    %{state | reported_status: :internet}
+    %{state | reported_status: :lan}
   end
 
   defp update_connection_status(
-         %{reported_status: :internet, derived_status: :disconnected} = state
-       ) do
+         %{derived_status: :disconnected} = state
+       ) when state.reported_status != :disconnected do
     RouteManager.set_connection_status(
       state.ifname,
       :disconnected,
       "QMI(#{inspect(state)}}"
     )
 
-    %{state | reported_status: :disconnected}
+    state = cancel_soft_recovery_timer(state)
+    state = cancel_stability_timer(state)
+
+    # Si venimos de LAN (o cualquier estado que no sea internet real validado), incrementamos intentos.
+    # Esto captura el caso de flapping donde nunca llega a dispararse el timer.
+    new_attempts =
+      if state.reported_status == :lan or state.reported_status == :internet,
+        do: state.soft_recovery_attempts + 1,
+        else: state.soft_recovery_attempts
+
+    %{state | reported_status: :disconnected, soft_recovery_attempts: new_attempts}
   end
 
   defp update_connection_status(state), do: state
+
+  defp maybe_start_stability_timer(%{stability_timer: nil} = state) do
+    # Require 60 seconds of stable :internet before resetting attempts
+    {:ok, timer} = :timer.send_after(60_000, :stability_check)
+    %{state | stability_timer: timer}
+  end
+  defp maybe_start_stability_timer(state), do: state
+
+  defp cancel_stability_timer(state) do
+    if state.stability_timer do
+      _ = :timer.cancel(state.stability_timer)
+    end
+
+    %{state | stability_timer: nil}
+  end
+
+  defp maybe_start_soft_recovery_timer(%{soft_recovery_timer: nil, reported_status: :lan} = state) do
+    # Try soft recovery after 20s if we are stuck in LAN (internet failed)
+    {:ok, timer} = :timer.send_after(20_000, :soft_recovery)
+    %{state | soft_recovery_timer: timer}
+  end
+  defp maybe_start_soft_recovery_timer(state), do: state
+
+  defp cancel_soft_recovery_timer(state) do
+    if state.soft_recovery_timer do
+      _ = :timer.cancel(state.soft_recovery_timer)
+    end
+
+    %{state | soft_recovery_timer: nil}
+  end
 
   defp has_ipv4_address?(nil), do: false
 

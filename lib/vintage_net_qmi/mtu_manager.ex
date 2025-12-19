@@ -71,26 +71,32 @@ defmodule VintageNetQMI.MtuManager do
 
   defp apply_mtu_and_mss(%{ifname: ifname, qmi: qmi}) do
     opts = [extended_mask: 0xFFFF_FFFF]
+    call_opts = [timeout: 10_000]
 
-    mtu =
-      case QMI.WirelessData.get_current_settings(qmi, 6, opts) do
-        {:ok, m} when is_map(m) and map_size(m) > 0 ->
-          m[:ipv6_mtu] || m[:ipv4_mtu]
+    try do
+      mtu =
+        case QMI.WirelessData.get_current_settings(qmi, 6, opts, call_opts) do
+          {:ok, m} when is_map(m) and map_size(m) > 0 ->
+            m[:ipv6_mtu] || m[:ipv4_mtu]
 
-        _ ->
-          case QMI.WirelessData.get_current_settings(qmi, 4, opts) do
-            {:ok, m} when is_map(m) and map_size(m) > 0 -> m[:ipv4_mtu] || m[:ipv6_mtu]
-            _ -> nil
-          end
+          _ ->
+            case QMI.WirelessData.get_current_settings(qmi, 4, opts, call_opts) do
+              {:ok, m} when is_map(m) and map_size(m) > 0 -> m[:ipv4_mtu] || m[:ipv6_mtu]
+              _ -> nil
+            end
+        end
+
+      if is_integer(mtu) and mtu > 0 do
+        set_mtu_linux(ifname, mtu)
+        :ok
+      else
+        Logger.debug("[VintageNetQMI] MTU not available yet for #{ifname}")
+        :noop
       end
-
-    if is_integer(mtu) and mtu > 0 do
-      set_mtu_linux(ifname, mtu)
-      # ensure_tcpmss_rules(ifname)
-      :ok
-    else
-      Logger.debug("[VintageNetQMI] MTU not available yet for #{ifname}")
-      :noop
+    catch
+      :exit, _reason ->
+        Logger.warning("[VintageNetQMI] MTU Manager call failed (likely device disconnected)")
+        :noop
     end
   end
 
