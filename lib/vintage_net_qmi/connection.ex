@@ -17,6 +17,7 @@ defmodule VintageNetQMI.Connection do
   require Logger
 
   @configuration_retry 30_000
+  @connect_retry_interval 30_000
 
   @typedoc """
   Options for to establish the connection
@@ -74,7 +75,7 @@ defmodule VintageNetQMI.Connection do
         qmi: VintageNetQMI.qmi_name(ifname),
         service_providers: providers,
         iccid: iccid,
-        connect_retry_interval: 30_000,
+        connect_retry_interval: @connect_retry_interval,
         radio_technologies: radio_technologies,
         configuration: Configuration.new(),
         packet_data_handle: nil
@@ -188,7 +189,7 @@ defmodule VintageNetQMI.Connection do
              profile_3gpp_index: three_3gpp_profile_index
            ) do
       Logger.info("[VintageNetQMI]: network started. Waiting on DHCP")
-      %{state | packet_data_handle: handle}
+      %{state | packet_data_handle: handle, connect_retry_interval: @connect_retry_interval}
     else
       {:error, :no_provider} ->
         Logger.warning(
