@@ -11,6 +11,8 @@ defmodule VintageNetQMI.Connectivity do
   alias VintageNet.PowerManager.PMControl
   alias VintageNet.RouteManager
 
+  require Logger
+
   # Serving system reports say which cell ID we're connected to
   # and various statuses. Moving between cell IDs causes the status
   # to look like the modem is disconnected, but then it reconnects
@@ -244,14 +246,23 @@ defmodule VintageNetQMI.Connectivity do
 
   def handle_info(:check_connectivity, state) do
     should_pet? =
-      case state.reported_status do
-        :internet -> true
-        :lan -> state.soft_recovery_attempts < 3
-        _ -> false
+      # Don't pet watchdog if derived_status is disconnected, regardless of reported_status
+      # This allows PowerManager to trigger when modem is truly disconnected
+      if state.derived_status == :disconnected do
+        false
+      else
+        case state.reported_status do
+          :internet -> true
+          :lan -> state.soft_recovery_attempts < 3
+          _ -> false
+        end
       end
 
     if should_pet? do
+      Logger.info("[VintageNetQMI] Petting watchdog for #{state.ifname}. Status: #{state.reported_status}, Attempts: #{state.soft_recovery_attempts}")
       PMControl.pet_watchdog(state.ifname)
+    else
+      Logger.warning("[VintageNetQMI] NOT petting watchdog for #{state.ifname}. Status: #{state.reported_status}, Derived: #{state.derived_status}, Attempts: #{state.soft_recovery_attempts}")
     end
 
     {:noreply, state}
