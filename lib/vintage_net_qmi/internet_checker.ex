@@ -131,6 +131,8 @@ defmodule VintageNetQMI.InternetChecker do
 
       other ->
         Logger.debug("[VintageNetQMI] internet ping failed on #{state.ifname}: #{inspect(other)}")
+        # If ping explicitly fails, downgrade to :lan so Connectivity can handle recovery
+        RouteManager.set_connection_status(state.ifname, :lan, "qmi_ping_failed")
         %{state | ping_list: rest}
     end
   end

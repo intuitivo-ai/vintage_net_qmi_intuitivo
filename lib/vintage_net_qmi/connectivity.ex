@@ -259,10 +259,7 @@ defmodule VintageNetQMI.Connectivity do
       end
 
     if should_pet? do
-      Logger.info("[VintageNetQMI] Petting watchdog for #{state.ifname}. Status: #{state.reported_status}, Attempts: #{state.soft_recovery_attempts}")
       PMControl.pet_watchdog(state.ifname)
-    else
-      Logger.warning("[VintageNetQMI] NOT petting watchdog for #{state.ifname}. Status: #{state.reported_status}, Derived: #{state.derived_status}, Attempts: #{state.soft_recovery_attempts}")
     end
 
     {:noreply, state}
