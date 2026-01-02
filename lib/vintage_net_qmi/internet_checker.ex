@@ -120,7 +120,12 @@ defmodule VintageNetQMI.InternetChecker do
 
   defp reload_ping_list(state), do: state
 
-  defp ping_once(%{ping_list: []} = state), do: state
+  defp ping_once(%{ping_list: []} = state) do
+    # No ping hosts available, but we have IP and lower_up.
+    # Fallback to :lan status so we don't get stuck in :disconnected.
+    RouteManager.set_connection_status(state.ifname, :lan, "qmi_no_ping_hosts")
+    state
+  end
 
   defp ping_once(%{ping_list: [{ip, port} | rest]} = state) do
     case TCPPing.ping(state.ifname, {ip, port}) do
