@@ -65,7 +65,7 @@ defmodule VintageNetQMI.InternetChecker do
     {:noreply, state, 0}
   end
 
-  def handle_info(_msg, state), do: {:noreply, state}
+  def handle_info(_msg, state), do: {:noreply, state, @interval_ms}
 
   defp check_connectivity(%{ifname: ifname} = state) do
     lower_up? = VintageNet.get(["interface", ifname, "lower_up"]) == true
@@ -122,8 +122,8 @@ defmodule VintageNetQMI.InternetChecker do
 
   defp ping_once(%{ping_list: []} = state), do: state
 
-  defp ping_once(%{ping_list: [{ip, _port} | rest]} = state) do
-    case TCPPing.ping(state.ifname, ip) do
+  defp ping_once(%{ping_list: [{ip, port} | rest]} = state) do
+    case TCPPing.ping(state.ifname, {ip, port}) do
       :ok ->
         RouteManager.set_connection_status(state.ifname, :internet, "qmi_ping")
         PMControl.pet_watchdog(state.ifname)
