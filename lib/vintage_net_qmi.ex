@@ -159,20 +159,27 @@ defmodule VintageNetQMI do
         child_specs: child_specs
       }
       |> IPv4Config.add_config(ipv4_config, [])
-      |> remove_connectivity_detector()
+      |> remove_connectivity_detectors(ifname)
+      |> add_qmi_internet_checker(ifname)
 
     config
   end
 
-  defp remove_connectivity_detector(raw_config) do
+  defp remove_connectivity_detectors(raw_config, ifname) do
     new_child_specs =
       Enum.reject(raw_config.child_specs, fn
         # Old internet connectivity checker module
         {VintageNet.Interface.InternetConnectivityChecker, _ifname} -> true
+        # New internet connectivity checker module (adds :lan (timeout) behavior)
+        {VintageNet.Connectivity.InternetChecker, ^ifname} -> true
         _ -> false
       end)
 
     %{raw_config | child_specs: new_child_specs}
+  end
+
+  defp add_qmi_internet_checker(raw_config, ifname) do
+    %{raw_config | child_specs: raw_config.child_specs ++ [{VintageNetQMI.InternetChecker, ifname: ifname}]}
   end
 
   @impl VintageNet.Technology
