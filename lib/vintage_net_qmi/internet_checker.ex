@@ -77,14 +77,16 @@ defmodule VintageNetQMI.InternetChecker do
     cond do
       not lower_up? ->
         # If the interface isn't up, it's definitely disconnected.
+        # Reset consecutive_ping_failures so we start fresh when interface comes back up
         RouteManager.set_connection_status(ifname, :disconnected, "qmi_ifdown")
-        %{state | inspector: %{}, ping_list: []}
+        %{state | inspector: %{}, ping_list: [], consecutive_ping_failures: 0}
 
       not has_ipv4_address?(VintageNet.get(["interface", ifname, "addresses"])) ->
         # For QMI, if we don't even have IPv4, treat it as disconnected. This
         # prevents "LAN (timeout)" behavior when there's no SIM/no DHCP lease.
+        # Reset consecutive_ping_failures so we start fresh when IP is assigned
         RouteManager.set_connection_status(ifname, :disconnected, "qmi_no_ipv4")
-        %{state | inspector: %{}, ping_list: []}
+        %{state | inspector: %{}, ping_list: [], consecutive_ping_failures: 0}
 
       true ->
         # 1) Try to infer internet from TCP activity

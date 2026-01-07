@@ -398,13 +398,20 @@ defmodule VintageNetQMI.Connectivity do
   defp update_connection_status(
          %{reported_status: :disconnected, derived_status: :lan} = state
        ) do
-    RouteManager.set_connection_status(
-      state.ifname,
-      :lan,
-      "QMI reports LAN connectivity"
-    )
+    # Don't reset to :lan if we've exceeded recovery attempts - stay disconnected
+    # so the watchdog can act
+    if state.soft_recovery_attempts >= 3 do
+      Logger.debug("[Connectivity] #{state.ifname}: blocking :lan transition, soft_recovery_attempts=#{state.soft_recovery_attempts}")
+      state
+    else
+      RouteManager.set_connection_status(
+        state.ifname,
+        :lan,
+        "QMI reports LAN connectivity"
+      )
 
-    %{state | reported_status: :lan}
+      %{state | reported_status: :lan}
+    end
   end
 
   defp update_connection_status(
