@@ -15,12 +15,15 @@ defmodule VintageNetQMI.InternetChecker do
 
   @initial_check_ms 5_000
   @interval_ms 30_000
+  # After this many consecutive ping failures, report :disconnected instead of :lan
+  @max_ping_failures_before_disconnected 3
 
   @type state :: %{
           ifname: VintageNet.ifname(),
           inspector: Inspector.cache(),
           configured_hosts: [{VintageNet.any_ip_address(), non_neg_integer()}],
-          ping_list: [{:inet.ip_address(), non_neg_integer()}]
+          ping_list: [{:inet.ip_address(), non_neg_integer()}],
+          consecutive_ping_failures: non_neg_integer()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -35,7 +38,8 @@ defmodule VintageNetQMI.InternetChecker do
       ifname: ifname,
       inspector: %{},
       configured_hosts: HostList.load(),
-      ping_list: []
+      ping_list: [],
+      consecutive_ping_failures: 0
     }
 
     {:ok, state, {:continue, :continue}}
@@ -91,7 +95,8 @@ defmodule VintageNetQMI.InternetChecker do
           :internet ->
             RouteManager.set_connection_status(ifname, :internet, "qmi_inspector")
             PMControl.pet_watchdog(ifname)
-            state
+            # Reset consecutive ping failures since we have internet
+            %{state | consecutive_ping_failures: 0}
 
           :no_internet ->
             # No IPv4 would have been caught above; keep calm and don't override
@@ -132,13 +137,24 @@ defmodule VintageNetQMI.InternetChecker do
       :ok ->
         RouteManager.set_connection_status(state.ifname, :internet, "qmi_ping")
         PMControl.pet_watchdog(state.ifname)
-        %{state | ping_list: rest}
+        # Reset consecutive failures on success
+        %{state | ping_list: rest, consecutive_ping_failures: 0}
 
       other ->
-        Logger.debug("[VintageNetQMI] internet ping failed on #{state.ifname}: #{inspect(other)}")
-        # If ping explicitly fails, downgrade to :lan so Connectivity can handle recovery
-        RouteManager.set_connection_status(state.ifname, :lan, "qmi_ping_failed")
-        %{state | ping_list: rest}
+        new_failures = state.consecutive_ping_failures + 1
+        Logger.debug("[VintageNetQMI] internet ping failed on #{state.ifname}: #{inspect(other)} (consecutive: #{new_failures})")
+
+        # After @max_ping_failures_before_disconnected consecutive failures,
+        # report :disconnected instead of :lan so watchdog is NOT petted
+        if new_failures >= @max_ping_failures_before_disconnected do
+          Logger.warning("[VintageNetQMI] #{state.ifname}: #{new_failures} consecutive ping failures, reporting :disconnected")
+          RouteManager.set_connection_status(state.ifname, :disconnected, "qmi_ping_failed_#{new_failures}x")
+        else
+          # Still within tolerance, report :lan so Connectivity can handle recovery
+          RouteManager.set_connection_status(state.ifname, :lan, "qmi_ping_failed")
+        end
+
+        %{state | ping_list: rest, consecutive_ping_failures: new_failures}
     end
   end
 
