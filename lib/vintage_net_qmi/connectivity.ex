@@ -199,13 +199,21 @@ defmodule VintageNetQMI.Connectivity do
         {VintageNet, ["interface", ifname, "connection"], _, :lan, _meta},
         %{ifname: ifname} = state
       ) do
-    new_state =
-      %{state | lan?: true, reported_status: :lan}
-      |> update_derived_status()
-      |> update_connection_status()
-      |> maybe_start_soft_recovery_timer()
+    # After 3 failed recovery attempts, ignore :lan reports and stay :disconnected
+    # This allows the watchdog to act instead of oscillating forever
+    if state.soft_recovery_attempts >= 3 do
+      Logger.warning("[Connectivity] #{ifname}: ignoring :lan report after #{state.soft_recovery_attempts} failed attempts, staying :disconnected")
+      RouteManager.set_connection_status(ifname, :disconnected, "max_recovery_attempts_exceeded")
+      {:noreply, %{state | lan?: true, reported_status: :disconnected}}
+    else
+      new_state =
+        %{state | lan?: true, reported_status: :lan}
+        |> update_derived_status()
+        |> update_connection_status()
+        |> maybe_start_soft_recovery_timer()
 
-    {:noreply, new_state}
+      {:noreply, new_state}
+    end
   end
 
   def handle_info(
@@ -390,13 +398,20 @@ defmodule VintageNetQMI.Connectivity do
   defp update_connection_status(
          %{reported_status: :disconnected, derived_status: :lan} = state
        ) do
-    RouteManager.set_connection_status(
-      state.ifname,
-      :lan,
-      "QMI reports LAN connectivity"
-    )
+    # Don't reset to :lan if we've exceeded recovery attempts - stay disconnected
+    # so the watchdog can act
+    if state.soft_recovery_attempts >= 3 do
+      Logger.debug("[Connectivity] #{state.ifname}: blocking :lan transition, soft_recovery_attempts=#{state.soft_recovery_attempts}")
+      state
+    else
+      RouteManager.set_connection_status(
+        state.ifname,
+        :lan,
+        "QMI reports LAN connectivity"
+      )
 
-    %{state | reported_status: :lan}
+      %{state | reported_status: :lan}
+    end
   end
 
   defp update_connection_status(
@@ -413,8 +428,9 @@ defmodule VintageNetQMI.Connectivity do
 
     # Si venimos de LAN (o cualquier estado que no sea internet real validado), incrementamos intentos.
     # Esto captura el caso de flapping donde nunca llega a dispararse el timer.
+    # Cap at 3 to avoid infinite increment - after 3 we stay disconnected anyway
     new_attempts =
-      if state.reported_status == :lan or state.reported_status == :internet,
+      if (state.reported_status == :lan or state.reported_status == :internet) and state.soft_recovery_attempts < 3,
         do: state.soft_recovery_attempts + 1,
         else: state.soft_recovery_attempts
 
