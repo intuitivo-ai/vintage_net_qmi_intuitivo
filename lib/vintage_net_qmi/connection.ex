@@ -160,9 +160,13 @@ defmodule VintageNetQMI.Connection do
   def handle_info(:try_to_configure, state) do
     new_state = try_to_configure_modem(state)
 
-    _ =
+    new_state =
       if Configuration.completely_configured?(new_state.configuration) do
-        Process.send_after(self(), :try_to_connect, 1_000)
+        # Reset backoff and use start_try_to_connect_timer so the existing
+        # tracked timer is cancelled and connect_retry_interval starts fresh.
+        start_try_to_connect_timer(%{new_state | connect_retry_interval: @initial_retry_interval})
+      else
+        new_state
       end
 
     {:noreply, new_state}
