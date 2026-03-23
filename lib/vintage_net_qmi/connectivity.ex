@@ -279,8 +279,17 @@ defmodule VintageNetQMI.Connectivity do
         %{state | soft_recovery_timer: timer, soft_recovery_attempts: state.soft_recovery_attempts + 1}
         |> maybe_schedule_hard_recovery()
       else
-        %{state | soft_recovery_timer: nil}
-        |> maybe_schedule_hard_recovery()
+        # Guard: if we already have confirmed internet (stale :soft_recovery in mailbox
+        # after an :internet event cleared the timer), do NOT reschedule hard recovery.
+        # Without this, the else branch would see hard_recovery_timer: nil +
+        # soft_recovery_attempts >= max and re-arm hard recovery on a working connection.
+        state = %{state | soft_recovery_timer: nil}
+
+        if state.reported_status == :internet do
+          state
+        else
+          maybe_schedule_hard_recovery(state)
+        end
       end
 
     {:noreply, new_state}
@@ -301,8 +310,13 @@ defmodule VintageNetQMI.Connectivity do
     new_state =
       if state.reported_status == :internet do
         # Connection has been stable in :internet state for the duration of the timer.
-        # Reset recovery attempts.
+        # Reset recovery attempts AND cancel any stale hard recovery timer.
+        # A stale :soft_recovery message processed after the :internet event can
+        # re-arm the hard recovery timer (since it clears soft_recovery_timer but sees
+        # hard_recovery_timer: nil + attempts >= max). Cancelling here ensures a
+        # working connection never triggers an unnecessary hard recovery reconnect.
         %{state | soft_recovery_attempts: 0, stability_timer: nil}
+        |> cancel_hard_recovery_timer()
       else
         # Connection was not stable, do not reset attempts.
         %{state | stability_timer: nil}

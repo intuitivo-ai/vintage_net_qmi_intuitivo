@@ -146,6 +146,127 @@ defmodule VintageNetQMI.ConnectivityRecoveryTest do
     end
   end
 
+  describe "race condition: stale :soft_recovery after :internet event" do
+    test "stale soft_recovery with :internet status does NOT reschedule hard recovery" do
+      # Race: :internet event fires → clears hard_recovery_timer + soft_recovery_timer
+      # → stale :soft_recovery arrives → reported_status is now :internet
+      # → old code: else branch called maybe_schedule_hard_recovery() unconditionally
+      # → new code: guard prevents rescheduling when reported_status == :internet
+
+      state = base_state(%{
+        reported_status: :internet,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: nil,  # cleared by :internet event
+        soft_recovery_timer: nil
+      })
+
+      # Simulate the else branch of :soft_recovery (reported_status != :lan, or attempts exhausted)
+      # With the fix, :internet status must prevent maybe_schedule_hard_recovery
+      new_state = simulate_stale_soft_recovery(state)
+
+      assert new_state.hard_recovery_timer == nil,
+             "Stale :soft_recovery must NOT reschedule hard recovery when :internet is confirmed"
+    end
+
+    test "stale soft_recovery with :disconnected still schedules hard recovery if needed" do
+      # If we're still disconnected (not internet), hard recovery should still be scheduled
+      state = base_state(%{
+        reported_status: :disconnected,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: nil,
+        soft_recovery_timer: nil
+      })
+
+      new_state = simulate_stale_soft_recovery(state)
+
+      assert new_state.hard_recovery_timer != nil,
+             "Stale :soft_recovery with :disconnected and exhausted attempts should schedule hard recovery"
+    end
+
+    test "stale soft_recovery with :lan and exhausted attempts schedules hard recovery" do
+      state = base_state(%{
+        reported_status: :lan,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: nil,
+        soft_recovery_timer: nil
+      })
+
+      new_state = simulate_stale_soft_recovery(state)
+      assert new_state.hard_recovery_timer != nil
+    end
+  end
+
+  describe "stability_check cancels stale hard recovery timer" do
+    test "stability confirmed: cancels hard recovery timer if still set" do
+      # Race: stale :soft_recovery re-armed hard_recovery_timer after :internet cleared it.
+      # stability_check fires 60s later and must clean up that stale timer.
+      stale_timer = make_ref()
+
+      state = base_state(%{
+        reported_status: :internet,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: stale_timer,
+        stability_timer: nil
+      })
+
+      new_state = simulate_stability_check(state)
+
+      assert new_state.hard_recovery_timer == nil,
+             "stability_check must cancel stale hard_recovery_timer"
+      assert new_state.soft_recovery_attempts == 0,
+             "stability_check must reset soft_recovery_attempts"
+    end
+
+    test "stability not confirmed: does NOT touch hard recovery timer" do
+      stale_timer = make_ref()
+
+      state = base_state(%{
+        reported_status: :lan,
+        hard_recovery_timer: stale_timer,
+        stability_timer: nil
+      })
+
+      new_state = simulate_stability_check(state)
+
+      assert new_state.hard_recovery_timer == stale_timer,
+             "stability_check with non-internet status must leave hard_recovery_timer alone"
+    end
+
+    test "full race: internet → stale soft_recovery → stability_check → no hard recovery" do
+      # Step 1: Internet confirmed, timers cleared
+      state = base_state(%{
+        reported_status: :internet,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: nil,
+        soft_recovery_timer: nil,
+        stability_timer: nil
+      })
+
+      # Step 2: Stale :soft_recovery arrives — with fix, should NOT re-arm hard recovery
+      state = simulate_stale_soft_recovery(state)
+      assert state.hard_recovery_timer == nil, "Fix 1: stale soft_recovery must not re-arm timer"
+
+      # Step 3: stability_check fires — also cancels any timer that slipped through
+      state = simulate_stability_check(state)
+      assert state.hard_recovery_timer == nil, "Fix 2: stability_check must clear any stale timer"
+      assert state.soft_recovery_attempts == 0
+    end
+
+    test "worst case: stale soft_recovery re-arms timer, stability_check saves the day" do
+      # Even if Fix 1 wasn't applied (old code re-arms), Fix 2 would catch it.
+      stale_timer = make_ref()
+      state = base_state(%{
+        reported_status: :internet,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: stale_timer,
+        stability_timer: nil
+      })
+
+      new_state = simulate_stability_check(state)
+      assert new_state.hard_recovery_timer == nil, "stability_check cancels stale timer"
+    end
+  end
+
   # --- Helper functions mirroring Connectivity logic ---
 
   defp base_state(overrides \\ %{}) do
@@ -184,5 +305,26 @@ defmodule VintageNetQMI.ConnectivityRecoveryTest do
 
   defp should_pet_watchdog?(reported_status, _attempts) do
     reported_status == :internet
+  end
+
+  # Mirrors fixed handle_info(:soft_recovery) else branch
+  defp simulate_stale_soft_recovery(state) do
+    state = %{state | soft_recovery_timer: nil}
+
+    if state.reported_status == :internet do
+      state
+    else
+      maybe_schedule_hard_recovery(state)
+    end
+  end
+
+  # Mirrors fixed handle_info(:stability_check)
+  defp simulate_stability_check(state) do
+    if state.reported_status == :internet do
+      %{state | soft_recovery_attempts: 0, stability_timer: nil}
+      |> cancel_hard_recovery_timer()
+    else
+      %{state | stability_timer: nil}
+    end
   end
 end
