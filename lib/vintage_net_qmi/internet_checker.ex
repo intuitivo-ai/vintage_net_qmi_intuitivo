@@ -14,8 +14,8 @@ defmodule VintageNetQMI.InternetChecker do
   require Logger
 
   @initial_check_ms 5_000
-  @interval_ms 30_000
-  # After this many consecutive ping failures, report :disconnected instead of :lan
+  @normal_interval_ms 30_000
+  @fast_interval_ms 5_000
   @max_ping_failures_before_disconnected 3
 
   @type state :: %{
@@ -56,7 +56,7 @@ defmodule VintageNetQMI.InternetChecker do
   @impl GenServer
   def handle_info(:timeout, state) do
     new_state = check_connectivity(state)
-    {:noreply, new_state, @interval_ms}
+    {:noreply, new_state, next_interval(new_state)}
   end
 
   def handle_info({_vn, ["interface", ifname, "lower_up"], _old, _new, _meta}, %{ifname: ifname} = state) do
@@ -69,7 +69,7 @@ defmodule VintageNetQMI.InternetChecker do
     {:noreply, state, 0}
   end
 
-  def handle_info(_msg, state), do: {:noreply, state, @interval_ms}
+  def handle_info(_msg, state), do: {:noreply, state, next_interval(state)}
 
   defp check_connectivity(%{ifname: ifname} = state) do
     lower_up? = VintageNet.get(["interface", ifname, "lower_up"]) == true
@@ -159,6 +159,9 @@ defmodule VintageNetQMI.InternetChecker do
         %{state | ping_list: rest, consecutive_ping_failures: new_failures}
     end
   end
+
+  defp next_interval(%{consecutive_ping_failures: 0}), do: @normal_interval_ms
+  defp next_interval(_state), do: @fast_interval_ms
 
   defp has_ipv4_address?(nil), do: false
 
