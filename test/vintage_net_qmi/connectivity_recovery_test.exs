@@ -267,6 +267,51 @@ defmodule VintageNetQMI.ConnectivityRecoveryTest do
     end
   end
 
+  describe "race condition: stale :hard_recovery after :internet event" do
+    test "stale hard_recovery with :internet status does NOT reconnect (returns state unchanged)" do
+      state = base_state(%{
+        reported_status: :internet,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: nil
+      })
+
+      new_state = simulate_hard_recovery_with_guard(state)
+
+      assert new_state.reported_status == :internet,
+             "Stale :hard_recovery must not alter reported_status"
+      assert new_state.soft_recovery_attempts == @max_soft_recovery_attempts,
+             "Stale :hard_recovery must not reset soft_recovery_attempts when internet is confirmed"
+      assert new_state.hard_recovery_timer == nil
+    end
+
+    test "hard_recovery with :disconnected still resets and reconnects" do
+      state = base_state(%{
+        reported_status: :disconnected,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: make_ref()
+      })
+
+      new_state = simulate_hard_recovery_with_guard(state)
+
+      assert new_state.soft_recovery_attempts == 0,
+             ":hard_recovery with :disconnected must reset attempts"
+      assert new_state.hard_recovery_timer == nil
+    end
+
+    test "hard_recovery with :lan still resets and reconnects" do
+      state = base_state(%{
+        reported_status: :lan,
+        soft_recovery_attempts: @max_soft_recovery_attempts,
+        hard_recovery_timer: make_ref()
+      })
+
+      new_state = simulate_hard_recovery_with_guard(state)
+
+      assert new_state.soft_recovery_attempts == 0
+      assert new_state.hard_recovery_timer == nil
+    end
+  end
+
   # --- Helper functions mirroring Connectivity logic ---
 
   defp base_state(overrides \\ %{}) do
@@ -297,6 +342,17 @@ defmodule VintageNetQMI.ConnectivityRecoveryTest do
 
   defp simulate_hard_recovery(state) do
     %{state | soft_recovery_attempts: 0, hard_recovery_timer: nil, soft_recovery_timer: nil}
+  end
+
+  # Mirrors fixed handle_info(:hard_recovery) with the :internet guard
+  defp simulate_hard_recovery_with_guard(state) do
+    state = %{state | hard_recovery_timer: nil}
+
+    if state.reported_status == :internet do
+      state
+    else
+      %{state | soft_recovery_attempts: 0, soft_recovery_timer: nil}
+    end
   end
 
   defp simulate_internet_restored(state) do

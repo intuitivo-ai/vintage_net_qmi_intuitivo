@@ -296,14 +296,21 @@ defmodule VintageNetQMI.Connectivity do
   end
 
   def handle_info(:hard_recovery, state) do
-    Logger.warning("[Connectivity] #{state.ifname}: hard recovery triggered, resetting recovery state and reconnecting")
+    state = %{state | hard_recovery_timer: nil}
 
-    state =
-      %{state | soft_recovery_attempts: 0, hard_recovery_timer: nil}
-      |> cancel_soft_recovery_timer()
+    if state.reported_status == :internet do
+      Logger.info("[Connectivity] #{state.ifname}: ignoring stale :hard_recovery, internet already restored")
+      {:noreply, state}
+    else
+      Logger.warning("[Connectivity] #{state.ifname}: hard recovery triggered, resetting recovery state and reconnecting")
 
-    VintageNetQMI.Connection.reconnect(state.ifname)
-    {:noreply, state}
+      state =
+        %{state | soft_recovery_attempts: 0}
+        |> cancel_soft_recovery_timer()
+
+      VintageNetQMI.Connection.reconnect(state.ifname)
+      {:noreply, state}
+    end
   end
 
   def handle_info(:stability_check, state) do
