@@ -18,6 +18,8 @@ defmodule VintageNetQMI.Connectivity do
   # to look like the modem is disconnected, but then it reconnects
   # quickly. The grace period lets things settle.
   @serving_system_down_grace_period 30_000
+  @hard_recovery_interval 300_000
+  @max_soft_recovery_attempts 3
 
   @typedoc """
   Connectivity server initial arguments
@@ -37,7 +39,8 @@ defmodule VintageNetQMI.Connectivity do
     :packet_data_connection?,
     :soft_recovery_timer,
     :soft_recovery_attempts,
-    :stability_timer
+    :stability_timer,
+    :hard_recovery_timer
   ]
 
   @doc """
@@ -110,7 +113,8 @@ defmodule VintageNetQMI.Connectivity do
       # IP address configuration can commence.
       packet_data_connection?: guessed_status == :lan,
       soft_recovery_attempts: 0,
-      stability_timer: nil
+      stability_timer: nil,
+      hard_recovery_timer: nil
     }
 
     _ = :timer.send_interval(30_000, :check_connectivity)
@@ -189,6 +193,7 @@ defmodule VintageNetQMI.Connectivity do
     new_state =
       %{state | reported_status: :internet, lan?: true}
       |> cancel_soft_recovery_timer()
+      |> cancel_hard_recovery_timer()
       |> maybe_start_stability_timer()
       |> update_derived_status()
 
@@ -199,12 +204,10 @@ defmodule VintageNetQMI.Connectivity do
         {VintageNet, ["interface", ifname, "connection"], _, :lan, _meta},
         %{ifname: ifname} = state
       ) do
-    # After 3 failed recovery attempts, ignore :lan reports and stay :disconnected
-    # This allows the watchdog to act instead of oscillating forever
-    if state.soft_recovery_attempts >= 3 do
+    if state.soft_recovery_attempts >= @max_soft_recovery_attempts do
       Logger.warning("[Connectivity] #{ifname}: ignoring :lan report after #{state.soft_recovery_attempts} failed attempts, staying :disconnected")
       RouteManager.set_connection_status(ifname, :disconnected, "max_recovery_attempts_exceeded")
-      {:noreply, %{state | lan?: true, reported_status: :disconnected}}
+      {:noreply, %{state | lan?: true, reported_status: :disconnected} |> maybe_schedule_hard_recovery()}
     else
       new_state =
         %{state | lan?: true, reported_status: :lan}
@@ -253,18 +256,11 @@ defmodule VintageNetQMI.Connectivity do
   end
 
   def handle_info(:check_connectivity, state) do
-    should_pet? =
-      # Don't pet watchdog if derived_status is disconnected, regardless of reported_status
-      # This allows PowerManager to trigger when modem is truly disconnected
-      if state.derived_status == :disconnected do
-        false
-      else
-        case state.reported_status do
-          :internet -> true
-          :lan -> state.soft_recovery_attempts < 3
-          _ -> false
-        end
-      end
+    # Only pet watchdog when we have CONFIRMED internet (ping OK).
+    # Never pet on :lan alone — :lan means "modem says connected" but
+    # internet hasn't been validated by ping. Petting on :lan would
+    # prevent PowerManager from resetting the modem when it's stuck.
+    should_pet? = state.reported_status == :internet
 
     if should_pet? do
       PMControl.pet_watchdog(state.ifname)
@@ -275,26 +271,59 @@ defmodule VintageNetQMI.Connectivity do
 
   def handle_info(:soft_recovery, state) do
     new_state =
-      if state.reported_status == :lan and state.soft_recovery_attempts < 3 do
+      if state.reported_status == :lan and state.soft_recovery_attempts < @max_soft_recovery_attempts do
         VintageNetQMI.Connection.reconnect(state.ifname)
 
-        # Reiniciamos el timer explícitamente para el siguiente intento
         {:ok, timer} = :timer.send_after(20_000, :soft_recovery)
 
         %{state | soft_recovery_timer: timer, soft_recovery_attempts: state.soft_recovery_attempts + 1}
+        |> maybe_schedule_hard_recovery()
       else
-        %{state | soft_recovery_timer: nil}
+        # Guard: if we already have confirmed internet (stale :soft_recovery in mailbox
+        # after an :internet event cleared the timer), do NOT reschedule hard recovery.
+        # Without this, the else branch would see hard_recovery_timer: nil +
+        # soft_recovery_attempts >= max and re-arm hard recovery on a working connection.
+        state = %{state | soft_recovery_timer: nil}
+
+        if state.reported_status == :internet do
+          state
+        else
+          maybe_schedule_hard_recovery(state)
+        end
       end
 
     {:noreply, new_state}
+  end
+
+  def handle_info(:hard_recovery, state) do
+    state = %{state | hard_recovery_timer: nil}
+
+    if state.reported_status == :internet do
+      Logger.info("[Connectivity] #{state.ifname}: ignoring stale :hard_recovery, internet already restored")
+      {:noreply, state}
+    else
+      Logger.warning("[Connectivity] #{state.ifname}: hard recovery triggered, resetting recovery state and reconnecting")
+
+      state =
+        %{state | soft_recovery_attempts: 0}
+        |> cancel_soft_recovery_timer()
+
+      VintageNetQMI.Connection.reconnect(state.ifname)
+      {:noreply, state}
+    end
   end
 
   def handle_info(:stability_check, state) do
     new_state =
       if state.reported_status == :internet do
         # Connection has been stable in :internet state for the duration of the timer.
-        # Reset recovery attempts.
+        # Reset recovery attempts AND cancel any stale hard recovery timer.
+        # A stale :soft_recovery message processed after the :internet event can
+        # re-arm the hard recovery timer (since it clears soft_recovery_timer but sees
+        # hard_recovery_timer: nil + attempts >= max). Cancelling here ensures a
+        # working connection never triggers an unnecessary hard recovery reconnect.
         %{state | soft_recovery_attempts: 0, stability_timer: nil}
+        |> cancel_hard_recovery_timer()
       else
         # Connection was not stable, do not reset attempts.
         %{state | stability_timer: nil}
@@ -400,9 +429,9 @@ defmodule VintageNetQMI.Connectivity do
        ) do
     # Don't reset to :lan if we've exceeded recovery attempts - stay disconnected
     # so the watchdog can act
-    if state.soft_recovery_attempts >= 3 do
+    if state.soft_recovery_attempts >= @max_soft_recovery_attempts do
       Logger.debug("[Connectivity] #{state.ifname}: blocking :lan transition, soft_recovery_attempts=#{state.soft_recovery_attempts}")
-      state
+      maybe_schedule_hard_recovery(state)
     else
       RouteManager.set_connection_status(
         state.ifname,
@@ -430,11 +459,12 @@ defmodule VintageNetQMI.Connectivity do
     # Esto captura el caso de flapping donde nunca llega a dispararse el timer.
     # Cap at 3 to avoid infinite increment - after 3 we stay disconnected anyway
     new_attempts =
-      if (state.reported_status == :lan or state.reported_status == :internet) and state.soft_recovery_attempts < 3,
+      if (state.reported_status == :lan or state.reported_status == :internet) and state.soft_recovery_attempts < @max_soft_recovery_attempts,
         do: state.soft_recovery_attempts + 1,
         else: state.soft_recovery_attempts
 
     %{state | reported_status: :disconnected, soft_recovery_attempts: new_attempts}
+    |> maybe_schedule_hard_recovery()
   end
 
   defp update_connection_status(state), do: state
@@ -467,6 +497,23 @@ defmodule VintageNetQMI.Connectivity do
     end
 
     %{state | soft_recovery_timer: nil}
+  end
+
+  defp maybe_schedule_hard_recovery(%{hard_recovery_timer: nil, soft_recovery_attempts: attempts} = state)
+       when attempts >= @max_soft_recovery_attempts do
+    Logger.info("[Connectivity] #{state.ifname}: scheduling hard recovery in #{@hard_recovery_interval}ms")
+    {:ok, timer} = :timer.send_after(@hard_recovery_interval, :hard_recovery)
+    %{state | hard_recovery_timer: timer}
+  end
+
+  defp maybe_schedule_hard_recovery(state), do: state
+
+  defp cancel_hard_recovery_timer(state) do
+    if state.hard_recovery_timer do
+      _ = :timer.cancel(state.hard_recovery_timer)
+    end
+
+    %{state | hard_recovery_timer: nil}
   end
 
   defp has_ipv4_address?(nil), do: false

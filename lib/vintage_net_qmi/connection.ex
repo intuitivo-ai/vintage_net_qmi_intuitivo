@@ -17,7 +17,9 @@ defmodule VintageNetQMI.Connection do
   require Logger
 
   @configuration_retry 30_000
-  @connect_retry_interval 30_000
+  @initial_retry_interval 5_000
+  @max_retry_interval 120_000
+  @backoff_multiplier 2
 
   @typedoc """
   Options for to establish the connection
@@ -75,10 +77,11 @@ defmodule VintageNetQMI.Connection do
         qmi: VintageNetQMI.qmi_name(ifname),
         service_providers: providers,
         iccid: iccid,
-        connect_retry_interval: @connect_retry_interval,
+        connect_retry_interval: @initial_retry_interval,
         radio_technologies: radio_technologies,
         configuration: Configuration.new(),
-        packet_data_handle: nil
+        packet_data_handle: nil,
+        try_to_connect_timer: nil
       }
       |> try_to_configure_modem()
       |> maybe_start_try_to_connect_timer()
@@ -139,9 +142,8 @@ defmodule VintageNetQMI.Connection do
       {:error, reason} -> Logger.warning("[VintageNetQMI] Failed to stop network interface: #{inspect(reason)}")
     end
 
-    # Schedule a reconnect
-    state = start_try_to_connect_timer(%{state | connect_retry_interval: 1000, packet_data_handle: nil})
-    {:noreply, state}
+    state = %{state | connect_retry_interval: @initial_retry_interval, packet_data_handle: nil}
+    {:noreply, start_try_to_connect_timer(state)}
   end
 
   @impl GenServer
@@ -158,16 +160,20 @@ defmodule VintageNetQMI.Connection do
   def handle_info(:try_to_configure, state) do
     new_state = try_to_configure_modem(state)
 
-    _ =
+    new_state =
       if Configuration.completely_configured?(new_state.configuration) do
-        Process.send_after(self(), :try_to_connect, 1_000)
+        # Reset backoff and use start_try_to_connect_timer so the existing
+        # tracked timer is cancelled and connect_retry_interval starts fresh.
+        start_try_to_connect_timer(%{new_state | connect_retry_interval: @initial_retry_interval})
+      else
+        new_state
       end
 
     {:noreply, new_state}
   end
 
   def handle_info(:try_to_connect, state) do
-    {:noreply, try_to_connect(state)}
+    {:noreply, try_to_connect(%{state | try_to_connect_timer: nil})}
   end
 
   def handle_info(_message, state) do
@@ -189,7 +195,7 @@ defmodule VintageNetQMI.Connection do
              profile_3gpp_index: three_3gpp_profile_index
            ) do
       Logger.info("[VintageNetQMI]: network started. Waiting on DHCP")
-      %{state | packet_data_handle: handle, connect_retry_interval: @connect_retry_interval}
+      %{state | packet_data_handle: handle, connect_retry_interval: @initial_retry_interval}
     else
       {:error, :no_provider} ->
         Logger.warning(
@@ -266,7 +272,12 @@ defmodule VintageNetQMI.Connection do
   end
 
   defp start_try_to_connect_timer(state) do
-    _ = Process.send_after(self(), :try_to_connect, state.connect_retry_interval)
-    state
+    if state.try_to_connect_timer, do: Process.cancel_timer(state.try_to_connect_timer)
+
+    interval = state.connect_retry_interval
+    timer = Process.send_after(self(), :try_to_connect, interval)
+    next_interval = min(interval * @backoff_multiplier, @max_retry_interval)
+
+    %{state | try_to_connect_timer: timer, connect_retry_interval: next_interval}
   end
 end

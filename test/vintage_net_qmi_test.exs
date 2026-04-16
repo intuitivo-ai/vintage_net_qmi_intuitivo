@@ -34,7 +34,9 @@ defmodule VintageNetQMITest do
         {VintageNetQMI.CellMonitor, [ifname: "wwan0"]},
         {VintageNetQMI.SignalMonitor, [ifname: "wwan0"]},
         {VintageNetQMI.ModemInfo, [ifname: "wwan0"]},
-        Utils.udhcpc_child_spec("wwan0", "unit_test")
+        {VintageNetQMI.MtuManager, [ifname: "wwan0"]},
+        Utils.udhcpc_child_spec("wwan0", "unit_test"),
+        {VintageNetQMI.InternetChecker, [ifname: "wwan0"]}
       ],
       down_cmds: [
         {:run_ignore_errors, "ip", ["addr", "flush", "dev", "wwan0", "label", "wwan0"]},
@@ -49,5 +51,33 @@ defmodule VintageNetQMITest do
     created = VintageNetQMI.to_raw_config("wwan0", input, Utils.default_opts())
 
     assert created == expected
+  end
+
+  test "VintageNet's InternetChecker is removed from child_specs" do
+    input = %{
+      type: VintageNetQMI,
+      vintage_net_qmi: %{service_providers: [%{apn: "test"}]},
+      hostname: "unit_test"
+    }
+
+    config = VintageNetQMI.to_raw_config("wwan0", input, Utils.default_opts())
+
+    child_spec_modules =
+      Enum.map(config.child_specs, fn
+        {module, _args} -> module
+        %{id: id} -> id
+      end)
+
+    refute VintageNet.Connectivity.InternetChecker in child_spec_modules,
+           "VintageNet's InternetChecker should be removed (it pets watchdog on :lan)"
+
+    refute VintageNet.Interface.InternetConnectivityChecker in child_spec_modules,
+           "VintageNet's old InternetConnectivityChecker should be removed"
+
+    refute VintageNet.Connectivity.LANChecker in child_spec_modules,
+           "VintageNet's LANChecker should not be present"
+
+    assert VintageNetQMI.InternetChecker in child_spec_modules,
+           "QMI's own InternetChecker must be present"
   end
 end
